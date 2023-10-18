@@ -1,0 +1,9 @@
+<!-- res/values/styles.xml -->
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- Base application theme. -->
+    <style name="Base.Theme.FirebaseChat" parent="Theme.MaterialComponents.DayNight.DarkActionBar">
+        <item name="colorPrimary">@color/my_action_bar_color</item>
+    </style>
+
+    <style name="Theme.FirebaseChat" parent="Base.Theme.FirebaseChat" />
+</resources>
