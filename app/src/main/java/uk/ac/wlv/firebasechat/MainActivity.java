@@ -1,32 +1,55 @@
 package uk.ac.wlv.firebasechat;
 
-import androidx.appcompat.app.AppCompatActivity;
+import android.content.DialogInterface;
+import android.content.Intent;
 import android.content.SharedPreferences;
-import android.preference.PreferenceManager;
+import android.net.Uri;
 import android.os.Bundle;
-import androidx.annotation.NonNull;
-import androidx.core.content.ContextCompat;
-import androidx.recyclerview.widget.LinearLayoutManager;
-import androidx.recyclerview.widget.RecyclerView;
+import android.preference.PreferenceManager;
 import android.text.Editable;
 import android.text.TextWatcher;
 import android.util.Log;
+import android.view.LayoutInflater;
 import android.view.Menu;
 import android.view.MenuInflater;
 import android.view.MenuItem;
 import android.view.View;
+import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.ImageView;
 import android.widget.ProgressBar;
 import android.widget.TextView;
 import android.widget.Toast;
-import android.widget.Toolbar;
 
+import androidx.annotation.NonNull;
+import androidx.appcompat.app.AlertDialog;
+import androidx.appcompat.app.AppCompatActivity;
+import androidx.recyclerview.widget.LinearLayoutManager;
+import androidx.recyclerview.widget.RecyclerView;
+
+import com.bumptech.glide.Glide;
+import com.firebase.ui.database.FirebaseRecyclerAdapter;
+import com.firebase.ui.database.FirebaseRecyclerOptions;
+import com.firebase.ui.database.SnapshotParser;
 import com.google.android.gms.auth.api.Auth;
 import com.google.android.gms.common.ConnectionResult;
-import com.google.android.gms.common.api.GoogleApiActivity;
 import com.google.android.gms.common.api.GoogleApiClient;
+import com.google.android.gms.tasks.OnCompleteListener;
+import com.google.android.gms.tasks.Task;
+import com.google.firebase.auth.FirebaseAuth;
+import com.google.firebase.auth.FirebaseUser;
+import com.google.firebase.database.DataSnapshot;
+import com.google.firebase.database.DatabaseError;
+import com.google.firebase.database.DatabaseReference;
+import com.google.firebase.database.FirebaseDatabase;
+import com.google.firebase.storage.FirebaseStorage;
+import com.google.firebase.storage.StorageReference;
+import com.google.firebase.storage.UploadTask;
+
+import java.util.HashMap;
+import java.util.Map;
+
 
 public class MainActivity extends AppCompatActivity
         implements GoogleApiClient.OnConnectionFailedListener {
@@ -51,6 +74,12 @@ public class MainActivity extends AppCompatActivity
     private EditText mMessageEditText;
     private ImageView mAddMessageImageView;
 
+    //Firebase instance variables
+    private FirebaseAuth mFirebaseAuth;
+    private FirebaseUser mFirebaseUser;
+    private DatabaseReference mFirebaseDatabaseReference;
+    private FirebaseRecyclerAdapter<ChatMessage, MessageViewHolder> mFirebaseAdapter;
+
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -58,6 +87,20 @@ public class MainActivity extends AppCompatActivity
         setContentView(R.layout.activity_main);
         mSharedPreferences = PreferenceManager.getDefaultSharedPreferences(this);
         mUsername = ANONYMOUS;
+        //Initialize firebase auth
+        mFirebaseAuth = FirebaseAuth.getInstance();
+        mFirebaseUser = mFirebaseAuth.getCurrentUser();
+        if (mFirebaseUser == null) {
+            //not signed in, launch sign in activity
+            startActivity(new Intent(this, SignInActivity.class));
+            finish();
+            return;
+        } else {
+            mUsername = mFirebaseUser.getDisplayName();
+            if (mFirebaseUser.getPhotoUrl() != null) {
+                mPhotoUrl = mFirebaseUser.getPhotoUrl().toString();
+            }
+        }
 
         mGoogleApiClient = new GoogleApiClient.Builder(this)
                 .enableAutoManage(this, this)
@@ -70,12 +113,14 @@ public class MainActivity extends AppCompatActivity
         mLinearLayoutManager = new LinearLayoutManager(this);
         mLinearLayoutManager.setStackFromEnd(true);
         mMessageRecyclerView.setLayoutManager(mLinearLayoutManager);
-        mProgressBar.setVisibility(ProgressBar.INVISIBLE);
+        //mProgressBar.setVisibility(ProgressBar.INVISIBLE);
+        loadFirebaseMessages();
         mMessageEditText = (EditText) findViewById(R.id.messageEditText);
         mMessageEditText.addTextChangedListener(new TextWatcher() {
             @Override
             public void beforeTextChanged(CharSequence charSequence, int i, int i1, int i2) {
             }
+
             @Override
             public void onTextChanged(CharSequence charSequence, int i, int i1, int i2) {
                 if (charSequence.toString().trim().length() > 0) {
@@ -84,6 +129,7 @@ public class MainActivity extends AppCompatActivity
                     mSendButton.setEnabled(false);
                 }
             }
+
             @Override
             public void afterTextChanged(Editable editable) {
 
@@ -94,6 +140,10 @@ public class MainActivity extends AppCompatActivity
         mSendButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
+                ChatMessage chatMessage = new ChatMessage(mMessageEditText.getText().toString(),
+                        mUsername, mPhotoUrl, null);
+                mFirebaseDatabaseReference.child(MESSAGES_CHILD).push().setValue(chatMessage);
+                mMessageEditText.setText("");
 
             }
         });
@@ -101,47 +151,72 @@ public class MainActivity extends AppCompatActivity
         mAddMessageImageView.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
+                Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                intent.addCategory(Intent.CATEGORY_OPENABLE);
+                intent.setType("image/*");
+                startActivityForResult(intent, REQUEST_IMAGE);
 
             }
         });
 
     }
+
     @Override
-    public void onStart(){
+    public void onStart() {
         super.onStart();
     }
+
     @Override
-    public void onPause(){
+    public void onPause() {
         super.onPause();
     }
+
     @Override
-    public void onResume(){
+    public void onResume() {
         super.onResume();
+        mFirebaseAdapter.startListening();
     }
+
     @Override
-    public void onDestroy(){
+    public void onDestroy() {
+        mFirebaseAdapter.stopListening();
         super.onDestroy();
     }
+
     @Override
-    public boolean onCreateOptionsMenu(Menu menu){
+    public boolean onCreateOptionsMenu(Menu menu) {
         MenuInflater inflater = getMenuInflater();
         inflater.inflate(R.menu.main_menu, menu);
         return true;
     }
+
     @Override
-    public boolean onOptionsItemSelected(MenuItem item){
-        return super.onOptionsItemSelected(item);
+    public boolean onOptionsItemSelected(MenuItem item) {
+        if (item.getItemId() == R.id.sign_out_menu) {
+            mFirebaseAuth.signOut();
+            Auth.GoogleSignInApi.signOut(mGoogleApiClient);
+            mUsername = ANONYMOUS;
+            startActivity(new Intent(this, SignInActivity.class));
+            finish();
+            return true;
+        } else {
+            return super.onOptionsItemSelected(item);
+        }
     }
+
+
     @Override
     public void onConnectionFailed(@NonNull ConnectionResult connectionResult) {
         Log.d(TAG, "onConnectinFailed:" + connectionResult);
         Toast.makeText(this, "Google Play Services error", Toast.LENGTH_SHORT).show();
     }
-    public static class MessageViewHolder extends RecyclerView.ViewHolder{
+
+    public static class MessageViewHolder extends RecyclerView.ViewHolder {
         TextView messageTextView;
         ImageView messageImageView;
         TextView messengerTextView;
         ImageView messengerImageView;
+
         public MessageViewHolder(View v) {
             super(v);
             messageTextView = (TextView) itemView.findViewById(R.id.messageTextView);
@@ -150,5 +225,182 @@ public class MainActivity extends AppCompatActivity
             messengerImageView = (ImageView) itemView.findViewById(R.id.messengerImageView);
         }
     }
+
+
+    private void loadFirebaseMessages() {
+        mFirebaseDatabaseReference =
+                FirebaseDatabase.getInstance().getReference();
+        SnapshotParser<ChatMessage> parser = new
+                SnapshotParser<ChatMessage>() {
+                    @Override
+                    public ChatMessage parseSnapshot(DataSnapshot dataSnapshot) {
+                        ChatMessage ChatMessage =
+                                dataSnapshot.getValue(ChatMessage.class);
+                        if (ChatMessage != null)
+                            ChatMessage.setId(dataSnapshot.getKey());
+                        return ChatMessage;
+                    }
+                };
+        DatabaseReference messagesRef =
+                mFirebaseDatabaseReference.child(MESSAGES_CHILD);
+        FirebaseRecyclerOptions<ChatMessage> options =
+                new
+                        FirebaseRecyclerOptions.Builder<ChatMessage>().setQuery(messagesRef,
+                        parser).build();
+        mFirebaseAdapter = new FirebaseRecyclerAdapter<ChatMessage,
+                MessageViewHolder>(options) {
+            @NonNull
+
+            @Override
+            public MessageViewHolder onCreateViewHolder(ViewGroup viewGroup, int i) {
+                LayoutInflater inflater =
+                        LayoutInflater.from(viewGroup.getContext());
+                return new
+                        MessageViewHolder(inflater.inflate(R.layout.item_message, viewGroup,
+                        false));
+            }
+
+            @Override
+            protected void onBindViewHolder(final MessageViewHolder viewHolder, int position, final ChatMessage chatMessage) {
+                mProgressBar.setVisibility(ProgressBar.INVISIBLE);
+
+                // Check for text
+                if (chatMessage.getText() != null && !chatMessage.getText().trim().isEmpty()) {
+                    viewHolder.messageTextView.setText(chatMessage.getText());
+                    viewHolder.messageTextView.setVisibility(TextView.VISIBLE);
+                } else {
+                    viewHolder.messageTextView.setVisibility(TextView.GONE);
+                }
+
+                // Check for image
+                if (chatMessage.getImageUrl() != null && !chatMessage.getImageUrl().trim().isEmpty()) {
+                    String imageUrl = chatMessage.getImageUrl();
+                    if (imageUrl.startsWith("gs://")) {
+                        StorageReference storageReference = FirebaseStorage.getInstance().getReferenceFromUrl(imageUrl);
+                        storageReference.getDownloadUrl().addOnCompleteListener(
+                                new OnCompleteListener<Uri>() {
+                                    @Override
+                                    public void onComplete(@NonNull Task<Uri> task) {
+                                        if (task.isSuccessful()) {
+                                            String downloadUrl = task.getResult().toString();
+                                            Glide.with(viewHolder.messageImageView.getContext()).load(downloadUrl).into(viewHolder.messageImageView);
+                                        } else {
+                                            Log.w(TAG, "Getting download url was not successful.", task.getException());
+                                        }
+                                    }
+                                });
+                    } else {
+                        Glide.with(viewHolder.messageImageView.getContext()).load(chatMessage.getImageUrl()).into(viewHolder.messageImageView);
+                    }
+                    viewHolder.messageImageView.setVisibility(ImageView.VISIBLE);
+                } else {
+                    viewHolder.messageImageView.setVisibility(ImageView.GONE);
+                }
+
+                viewHolder.messengerTextView.setText(chatMessage.getName());
+
+                // Check for sender's photo
+                if (chatMessage.getPhotoUrl() != null) {
+                    Glide.with(MainActivity.this).load(chatMessage.getPhotoUrl()).into(viewHolder.messengerImageView);
+                }
+
+                // Delete with long press
+                viewHolder.itemView.setOnLongClickListener(new View.OnLongClickListener() {
+                    @Override
+                    public boolean onLongClick(View v) {
+                        AlertDialog.Builder builder = new AlertDialog.Builder(viewHolder.itemView.getContext());
+                        builder.setTitle("Delete Message");
+                        builder.setMessage("Are you sure you want to delete this message?");
+                        builder.setPositiveButton("Delete", new DialogInterface.OnClickListener() {
+                            @Override
+                            public void onClick(DialogInterface dialog, int which) {
+                                mFirebaseDatabaseReference.child(MESSAGES_CHILD).child(chatMessage.getId()).removeValue();
+                            }
+                        });
+                        builder.setNegativeButton("Cancel", null);
+                        builder.show();
+                        return true;
+                    }
+                });
+            }
+        };
+        mFirebaseAdapter.registerAdapterDataObserver(new RecyclerView.AdapterDataObserver() {
+            @Override
+            public void onItemRangeInserted(int positionStart, int
+                    itemCount) {
+                super.onItemRangeInserted(positionStart, itemCount);
+                int ChatMessageCount = mFirebaseAdapter.getItemCount();
+                int lastVisiblePosition = mLinearLayoutManager.findLastCompletelyVisibleItemPosition();
+                if (lastVisiblePosition == -1 || (positionStart >=
+                        (ChatMessageCount - 1)
+                        && lastVisiblePosition == (positionStart - 1))) {
+                    mMessageRecyclerView.scrollToPosition(positionStart);
+                }
+            }
+        });
+        mMessageRecyclerView.setAdapter(mFirebaseAdapter);
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        EditText messageEditText = findViewById(R.id.messageEditText);
+        super.onActivityResult(requestCode, resultCode, data);
+        Log.d(TAG, "onActivityResult: requestCode=" + requestCode + ", resultCode=" + resultCode);
+        if (requestCode == REQUEST_IMAGE) {
+            if (resultCode == RESULT_OK) {
+                if (data != null) {
+                    final Uri uri = data.getData();
+                    Log.d(TAG, "Uri:" + uri.toString());
+
+                    String typedText = messageEditText.getText().toString();
+
+                    ChatMessage tempMessage = new ChatMessage(mMessageEditText.getText().toString(), mUsername, mPhotoUrl, LOADING_IMAGE_URL);
+                    mFirebaseDatabaseReference.child(MESSAGES_CHILD).push().setValue(
+                            tempMessage,
+                            new DatabaseReference.CompletionListener() {
+                                @Override
+                                public void onComplete(DatabaseError databaseError, DatabaseReference databaseReference) {
+                                    if (databaseError == null) {
+                                        String key = databaseReference.getKey();
+                                        StorageReference storageReference =
+                                                FirebaseStorage.getInstance().getReference(mFirebaseUser.getUid())
+                                                        .child(key).child(uri.getLastPathSegment());
+                                        putImageInStorage(storageReference, uri, key);
+                                    } else {
+                                        Log.v(TAG, "Unable to write message to database.", databaseError.toException());
+                                    }
+                                }
+                            });
+                    messageEditText.setText("");
+                }
+            }
+        }
+    }
+
+    private void putImageInStorage(StorageReference storageReference, Uri uri, final String key) {
+        storageReference.putFile(uri).addOnCompleteListener(MainActivity.this, new OnCompleteListener<UploadTask.TaskSnapshot>() {
+            @Override
+            public void onComplete(@NonNull Task<UploadTask.TaskSnapshot> task) {
+                if (task.isSuccessful()) {
+                    task.getResult().getMetadata().getReference().getDownloadUrl().addOnCompleteListener(MainActivity.this, new OnCompleteListener<Uri>() {
+                        @Override
+                        public void onComplete(@NonNull Task<Uri> task) {
+                            if (task.isSuccessful()) {
+                                Uri downloadUri = task.getResult();
+                                Map<String, Object> updateMap = new HashMap<>();
+                                updateMap.put("imageUrl", downloadUri.toString());
+                                mFirebaseDatabaseReference.child(MESSAGES_CHILD).child(key).updateChildren(updateMap);
+                                mMessageEditText.setText("");
+                            }
+                        }
+                    });
+                } else {
+                    Log.v(TAG, "Image upload task was not successful.", task.getException());
+                }
+            }
+        });
+    }
+
+
 
 }
